@@ -1,0 +1,151 @@
+#!/bin/bash
+# sandbox: Mantra Sandbox v1. An Android app runs in a headless emulator (AVD "mantra_sandbox", serial emulator-5580)
+# with its own screen, touch and keys. Everything goes through adb: the Mac's mouse and keyboard are never used.
+# Marko, 8.11.2026: "run CQ MixPad in some sandbox, so we can run in parallel. We are not fighting for the mouse and keyboard."
+#
+#   sandbox create                      make the AVD from the installed Pixel 7 image (no download; Pixel_7_API_35 untouched)
+#   sandbox start | stop | status       headless boot (-no-window -no-audio -no-boot-anim), kill, state
+#   sandbox install <apk> [more.apk]    install (several files = one split app)
+#   sandbox install-from-pixel <pkg>    pull the app's APKs from the real Pixel over adb (LAN/cable, never the SIM), install
+#   sandbox launch <pkg>                start the app            sandbox landscape | portrait
+#   sandbox shot [file.png]             screenshot (prints the path; default ~/.mantra_sandbox/shot.png)
+#   sandbox tap X Y | swipe X1 Y1 X2 Y2 [ms] | drag X1 Y1 X2 Y2 [ms] | type "text" | key <KEYCODE|number>
+#   sandbox ui [word]                   uiautomator dump: every element with text/desc and its centre (filter by word)
+#   sandbox run <macro> [k=v ...]       a macro file: steps run in ONE adb shell call (fast); ${k} filled from k=v
+#   sandbox redir <udp|tcp> <port>      forward that Mac port into the sandbox (for a man-in-the-middle's stream)
+#   sandbox adb <args...>               any adb command on the sandbox's serial
+# Macro steps (one per line, # comments):  tap X Y · swipe X1 Y1 X2 Y2 [ms] · drag X1 Y1 X2 Y2 [ms] · type TEXT ·
+#   key CODE · sleep MS · text "Label" (tap the element whose text/desc is Label: one ui dump, then the batch goes on) ·
+#   shot FILE (screenshot at that point) · include OTHER.macro
+set -e
+SDK="${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}"
+ADB="$SDK/platform-tools/adb"; EMU="$SDK/emulator/emulator"
+AVD=mantra_sandbox; PORT=5580; SERIAL="emulator-$PORT"
+HOME_DIR="$HOME/.mantra_sandbox"; mkdir -p "$HOME_DIR"
+SRC_AVD="$HOME/.android/avd/Pixel_7_API_35.avd"
+A() { "$ADB" -s "$SERIAL" "$@"; }
+die() { echo "sandbox: $*" >&2; exit 1; }
+here="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+
+running() { "$ADB" devices | grep -q "^$SERIAL[[:space:]]*device"; }
+
+cmd_create() {
+  local d="$HOME/.android/avd/$AVD.avd"
+  [ -d "$d" ] && { echo "exists: $d"; return; }
+  [ -f "$SRC_AVD/config.ini" ] || die "no Pixel_7_API_35 AVD to copy the hardware from"
+  mkdir -p "$d"
+  # same hardware and system image as Marko's Pixel 7 AVD; only the config is copied, never its data
+  grep -v -E '^(avd\.ini\.displayname|AvdId|skin\.)' "$SRC_AVD/config.ini" > "$d/config.ini"
+  { echo "AvdId=$AVD"; echo "avd.ini.displayname=Mantra Sandbox"; echo "hw.keyboard=yes"; echo "skin.name=1080x2400";
+    echo "skin.dynamic=yes"; echo "hw.audioInput=no"; echo "hw.audioOutput=no"; } >> "$d/config.ini"
+  printf 'avd.ini.encoding=UTF-8\npath=%s\npath.rel=avd/%s.avd\ntarget=android-35\n' "$d" "$AVD" > "$HOME/.android/avd/$AVD.ini"
+  echo "created $d (image $(grep image.sysdir "$d/config.ini" | cut -d= -f2))"
+}
+
+cmd_start() {
+  running && { echo "running: $SERIAL"; return; }
+  [ -d "$HOME/.android/avd/$AVD.avd" ] || cmd_create
+  nohup "$EMU" -avd "$AVD" -port "$PORT" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect \
+    -no-metrics > "$HOME_DIR/emulator.log" 2>&1 &
+  echo "booting $SERIAL (log $HOME_DIR/emulator.log)"
+  "$ADB" -s "$SERIAL" wait-for-device
+  for i in $(seq 1 120); do
+    [ "$(A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break; sleep 1; done
+  A shell settings put global window_animation_scale 0 >/dev/null 2>&1 || true
+  A shell settings put global transition_animation_scale 0 >/dev/null 2>&1 || true
+  A shell settings put global animator_duration_scale 0 >/dev/null 2>&1 || true
+  A shell input keyevent 82 >/dev/null 2>&1 || true   # unlock
+  echo "ready: $SERIAL"
+}
+
+cmd_stop() { running && A emu kill >/dev/null 2>&1; echo "stopped"; }
+
+cmd_status() {
+  if running; then
+    echo "running: $SERIAL  screen $(A shell wm size | tr -d '\r' | awk '{print $3}')  rotation $(A shell settings get system user_rotation | tr -d '\r')"
+    A shell dumpsys window 2>/dev/null | grep -m1 mCurrentFocus | sed 's/^ */focus: /'
+  else echo "stopped (AVD $( [ -d "$HOME/.android/avd/$AVD.avd" ] && echo exists || echo 'not created'))"; fi
+}
+
+cmd_install() { [ $# -gt 1 ] && A install-multiple -r "$@" || A install -r "$1"; }
+
+cmd_install_from_pixel() {
+  local pkg="$1" src="${PIXEL_SERIAL:-41241FDH2S10SJ}" dir="$HOME_DIR/apks/$1"
+  "$ADB" devices | grep -q "^$src[[:space:]]*device" || src=$("$ADB" devices | awk 'NR>1 && $2=="device" && $1!~/^emulator/ {print $1; exit}')
+  [ -n "$src" ] || die "no real phone on adb"
+  mkdir -p "$dir"; rm -f "$dir"/*.apk
+  for p in $("$ADB" -s "$src" shell pm path "$pkg" | tr -d '\r' | sed 's/^package://'); do
+    "$ADB" -s "$src" pull "$p" "$dir/" >/dev/null; done
+  ls "$dir"/*.apk >/dev/null 2>&1 || die "$pkg not on $src"
+  echo "pulled from $src: $(ls "$dir" | tr '\n' ' ')"
+  cmd_install "$dir"/*.apk
+}
+
+cmd_launch() { A shell monkey -p "$1" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; echo "launched $1"; }
+
+cmd_rotate() {  # landscape = 1, portrait = 0
+  A shell settings put system accelerometer_rotation 0; A shell settings put system user_rotation "$1"; }
+
+cmd_shot() { local f="${1:-$HOME_DIR/shot.png}"; A exec-out screencap -p > "$f"; echo "$f"; }
+
+# ui dump -> "text|desc|cx|cy" lines
+ui_lines() {
+  A shell uiautomator dump /sdcard/sb_ui.xml >/dev/null 2>&1 || true
+  A exec-out cat /sdcard/sb_ui.xml | python3 -c '
+import sys, re
+x = sys.stdin.read()
+for m in re.finditer(r"<node [^>]*>", x):
+    n = m.group(0); g = lambda k: (re.search(k + r"=\"([^\"]*)\"", n) or [None, ""])[1]
+    t, d, b = g("text"), g("content-desc"), g("bounds")
+    if not (t or d): continue
+    a = list(map(int, re.findall(r"\d+", b)))
+    print(f"{t}|{d}|{(a[0]+a[2])//2}|{(a[1]+a[3])//2}")'
+}
+
+cmd_ui() { if [ -n "$1" ]; then ui_lines | grep -i -- "$1" || true; else ui_lines; fi; }
+
+# a macro -> shell lines; "text" steps split the batch (each needs a fresh ui dump)
+cmd_run() {
+  local f="$1"; shift
+  [ -f "$f" ] || f="$here/../macros/$1"; [ -f "$f" ] || die "no macro $1"
+  local -a kv=("$@"); local batch="" t0=$(python3 -c 'import time;print(time.time())')
+  flush() { [ -n "$batch" ] && A shell "$batch" >/dev/null; batch=""; }
+  expand() { local s="$1"; for p in "${kv[@]}"; do s="${s//\$\{${p%%=*}\}/${p#*=}}"; done; echo "$s"; }
+  steps() { while IFS= read -r line || [ -n "$line" ]; do
+      line="$(expand "$line")"; line="${line%%#*}"; [ -z "${line// }" ] && continue
+      if [[ $line == include\ * ]]; then steps < "$(dirname "$f")/${line#include }"; else echo "$line"; fi
+    done; }
+  while IFS= read -r line; do
+    set -- $line; local op="$1"; shift
+    case "$op" in
+      tap)   batch+="input tap $1 $2;";;
+      swipe) batch+="input swipe $1 $2 $3 $4 ${5:-120};";;
+      drag)  batch+="input draganddrop $1 $2 $3 $4 ${5:-400};";;
+      key)   batch+="input keyevent $1;";;
+      type)  local s="${line#type }"; batch+="input text '${s// /%s}';";;
+      sleep) batch+="sleep $(python3 -c "print($1/1000)");";;
+      shot)  flush; A exec-out screencap -p > "$1"; echo "shot $1";;
+      text)  flush; local lab="${line#text }"; lab="${lab//\"/}"
+             local hit=$(ui_lines | awk -F'|' -v L="$lab" 'tolower($1)==tolower(L)||tolower($2)==tolower(L){print $3" "$4; exit}')
+             [ -n "$hit" ] || die "no element \"$lab\" on screen"; A shell input tap $hit;;
+      *) die "unknown step: $op";;
+    esac
+  done < <(steps < "$f")
+  flush
+  python3 -c "import time;print('done in %.2f s' % (time.time()-$t0))"
+}
+
+case "${1:-status}" in
+  create) cmd_create;; start) cmd_start;; stop) cmd_stop;; status) cmd_status;;
+  install) shift; cmd_install "$@";; install-from-pixel) cmd_install_from_pixel "$2";;
+  launch) cmd_launch "$2";; landscape) cmd_rotate 1;; portrait) cmd_rotate 0;;
+  shot) cmd_shot "$2";; tap) A shell input tap "$2" "$3";;
+  swipe) A shell input swipe "$2" "$3" "$4" "$5" "${6:-120}";;
+  drag) A shell input draganddrop "$2" "$3" "$4" "$5" "${6:-400}";;
+  type) s="$2"; A shell input text "'${s// /%s}'";; key) A shell input keyevent "$2";;
+  ui) cmd_ui "$2";; run) shift; cmd_run "$@";;
+  redir) A emu redir add "$2:$3:$3"; echo "Mac $2 $3 -> sandbox $3";;
+  adb) shift; A "$@";;
+  -h|--help|help) sed -n '2,20p' "$0";;
+  *) die "unknown command $1 (sandbox help)";;
+esac
