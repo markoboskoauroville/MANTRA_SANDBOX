@@ -1,0 +1,2 @@
+# drag a fader: x = strip, from = handle y now, to = new y
+swipe ${x} ${from} ${x} ${to} 600

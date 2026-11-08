@@ -9,7 +9,7 @@
 #   sandbox install-from-pixel <pkg>    pull the app's APKs from the real Pixel over adb (LAN/cable, never the SIM), install
 #   sandbox launch <pkg>                start the app            sandbox landscape | portrait
 #   sandbox shot [file.png]             screenshot (prints the path; default ~/.mantra_sandbox/shot.png)
-#   sandbox tap X Y | swipe X1 Y1 X2 Y2 [ms] | drag X1 Y1 X2 Y2 [ms] | type "text" | key <KEYCODE|number>
+#   sandbox tap X Y [ms] (a held press, 150 ms) | qtap X Y (bare tap) | swipe X1 Y1 X2 Y2 [ms] | drag X1 Y1 X2 Y2 [ms] | type "text" | key <KEYCODE|number>
 #   sandbox ui [word]                   uiautomator dump: every element with text/desc and its centre (filter by word)
 #   sandbox run <macro> [k=v ...]       a macro file: steps run in ONE adb shell call (fast); ${k} filled from k=v
 #   sandbox redir <udp|tcp> <port>      forward that Mac port into the sandbox (for a man-in-the-middle's stream)
@@ -118,7 +118,8 @@ cmd_run() {
   while IFS= read -r line; do
     set -- $line; local op="$1"; shift
     case "$op" in
-      tap)   batch+="input tap $1 $2;";;
+      tap)   batch+="input swipe $1 $2 $1 $2 ${3:-150};";;   # a held press: CQ MixPad ignores a bare tap and a 90 ms one on some buttons
+      qtap)  batch+="input tap $1 $2;";;
       swipe) batch+="input swipe $1 $2 $3 $4 ${5:-120};";;
       drag)  batch+="input draganddrop $1 $2 $3 $4 ${5:-400};";;
       key)   batch+="input keyevent $1;";;
@@ -139,7 +140,7 @@ case "${1:-status}" in
   create) cmd_create;; start) cmd_start;; stop) cmd_stop;; status) cmd_status;;
   install) shift; cmd_install "$@";; install-from-pixel) cmd_install_from_pixel "$2";;
   launch) cmd_launch "$2";; landscape) cmd_rotate 1;; portrait) cmd_rotate 0;;
-  shot) cmd_shot "$2";; tap) A shell input tap "$2" "$3";;
+  shot) cmd_shot "$2";; tap) A shell input swipe "$2" "$3" "$2" "$3" "${4:-150}";; qtap) A shell input tap "$2" "$3";;
   swipe) A shell input swipe "$2" "$3" "$4" "$5" "${6:-120}";;
   drag) A shell input draganddrop "$2" "$3" "$4" "$5" "${6:-400}";;
   type) s="$2"; A shell input text "'${s// /%s}'";; key) A shell input keyevent "$2";;

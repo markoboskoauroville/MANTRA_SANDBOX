@@ -1,0 +1,4 @@
+# select the strip (its name), then open its peq panel
+tap ${x} 114
+sleep 300
+tap ${x} 504

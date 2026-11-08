@@ -1,0 +1,28 @@
+# CQ MixPad start screen -> Other... (scroll the unit list to its end) -> 10.0.2.2 (the Mac: cq_mitm.py --sandbox) -> Connect
+swipe 1272 760 1272 420 300
+sleep 600
+tap 1266 962
+sleep 900
+key 123
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+key 67
+type 10.0.2.2
+key 66
